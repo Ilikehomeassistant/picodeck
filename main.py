@@ -2,7 +2,7 @@ import network, socket, ujson, ntptime, time, gc
 from machine import Pin, SoftSPI, reset
 import framebuf
 
-VERSION = "1.2"
+VERSION = "1.3"
 BETA    = True
 
 try:
@@ -502,6 +502,9 @@ for _ in range(30):
     if wlan.isconnected():
         break
     time.sleep(1)
+
+# Reset display state after partial refreshes before doing full refresh
+epd._init()
 
 # PicoDeck splash screen
 epd.fb.fill(1)
