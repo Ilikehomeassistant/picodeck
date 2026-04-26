@@ -1,0 +1,4 @@
+config.json
+*.uf2
+.claude/
+test_*.py

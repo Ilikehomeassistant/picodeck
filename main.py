@@ -1,6 +1,8 @@
 import network, socket, ujson, ntptime, time, gc
-from machine import Pin, SoftSPI
+from machine import Pin, SoftSPI, reset
 import framebuf
+
+VERSION = "1.1"
 
 try:
     import ssl
@@ -8,17 +10,8 @@ try:
 except ImportError:
     HAS_SSL = False
 
-WIDTH     = 176
-HEIGHT    = 264
-SSID      = 'YOUR_WIFI_SSID'
-PASSWORD  = 'YOUR_WIFI_PASSWORD'
-TZ_OFFSET = 0  # UTC offset in seconds: 3600 = UTC+1 (BST), 0 = UTC, 7200 = UTC+2, etc.
-
-# Open-Meteo weather location — find your coords at open-meteo.com
-WEATHER_LAT = 0.0   # e.g. 52.19
-WEATHER_LON = 0.0   # e.g. -8.87
-WEATHER_TZ  = "Europe%2FLondon"  # URL-encoded timezone, e.g. "America%2FNew_York"
-LOCATION_LABEL = "Your Location"  # Displayed on screen
+WIDTH  = 176
+HEIGHT = 264
 
 WMO = {
     0:"Clear Sky",   1:"Mainly Clear", 2:"Part. Cloudy",
@@ -29,6 +22,27 @@ WMO = {
    80:"Showers",   82:"Hvy Showers", 95:"Thunderstorm",
 }
 
+# ── config ────────────────────────────────────────────────────────────────────
+
+def _load_cfg():
+    try:
+        with open("config.json") as f:
+            return ujson.load(f)
+    except Exception as e:
+        print("config error:", e)
+        return {}
+
+_cfg           = _load_cfg()
+SSID           = _cfg.get("ssid", "")
+PASSWORD       = _cfg.get("password", "")
+TZ_OFFSET      = _cfg.get("tz_offset", 0)
+WEATHER_LAT    = _cfg.get("lat", 0.0)
+WEATHER_LON    = _cfg.get("lon", 0.0)
+WEATHER_TZ     = _cfg.get("tz", "UTC")
+LOCATION_LABEL = _cfg.get("label", "PicoDeck")
+
+
+# ── display driver ────────────────────────────────────────────────────────────
 
 class EPD:
     def __init__(self):
@@ -176,6 +190,51 @@ def https_body(host, path, cookie=None):
     return body
 
 
+# ── OTA update ────────────────────────────────────────────────────────────────
+
+_OTA_HOST = "raw.githubusercontent.com"
+_OTA_BASE = "/Ilikehomeassistant/picodeck/main"
+
+
+def ota_check(epd):
+    try:
+        ver_body = https_body(_OTA_HOST, _OTA_BASE + "/version.txt")
+        if not ver_body:
+            print("OTA: could not fetch version")
+            return
+        remote = ver_body.strip().decode()
+        if remote == VERSION:
+            print("OTA: up to date (%s)" % VERSION)
+            return
+        print("OTA: update available %s -> %s" % (VERSION, remote))
+        epd.fb.fill(1)
+        epd.fb.fill_rect(0, 0, WIDTH, 16, 0)
+        msg = "Update v" + remote
+        epd.fb.text(msg, (WIDTH - len(msg) * 8) // 2, 4, 1)
+        epd.fb.text("Downloading...", (WIDTH - 13 * 8) // 2, 120, 0)
+        epd.show()
+        gc.collect()
+        new_code = https_body(_OTA_HOST, _OTA_BASE + "/main.py")
+        if not new_code:
+            print("OTA: download failed")
+            return
+        with open("main.py", "wb") as f:
+            f.write(new_code)
+        with open("version.txt", "w") as f:
+            f.write(remote)
+        print("OTA: done, rebooting")
+        epd.fb.fill(1)
+        epd.fb.fill_rect(0, 0, WIDTH, 16, 0)
+        done = "Updated! v" + remote
+        epd.fb.text(done, (WIDTH - len(done) * 8) // 2, 4, 1)
+        epd.fb.text("Rebooting...", (WIDTH - 12 * 8) // 2, 120, 0)
+        epd.show()
+        time.sleep(2)
+        reset()
+    except Exception as e:
+        print("OTA error:", e)
+
+
 # ── Yahoo Finance crumb auth ──────────────────────────────────────────────────
 
 _yf = {"cookie": None, "crumb": None}
@@ -257,9 +316,10 @@ def fetch_yahoo(symbols, names):
 
 def fetch_weather():
     try:
-        body = http_get("api.open-meteo.com",
+        # Use HTTPS; field is now weather_code (renamed from weathercode)
+        body = https_body("api.open-meteo.com",
             "/v1/forecast?latitude=%s&longitude=%s"
-            "&current=temperature_2m,weathercode,windspeed_10m,"
+            "&current=temperature_2m,weather_code,windspeed_10m,"
             "relative_humidity_2m,apparent_temperature"
             "&forecast_days=1&timezone=%s" % (WEATHER_LAT, WEATHER_LON, WEATHER_TZ))
         if not body:
@@ -270,7 +330,7 @@ def fetch_weather():
             "feels":    round(d["apparent_temperature"]),
             "humidity": round(d["relative_humidity_2m"]),
             "wind":     round(d["windspeed_10m"]),
-            "code":     d["weathercode"],
+            "code":     d["weather_code"],
         }
     except Exception as e:
         print("weather error:", e)
@@ -317,7 +377,7 @@ def fetch_markets():
         if body:
             d = ujson.loads(body)["rates"]
             eur_usd = d["USD"]
-            results.append(("EUR",  eur_usd,        0.0))
+            results.append(("EUR",  eur_usd,             0.0))
             results.append(("USD",  round(1/eur_usd, 4), 0.0))
         else:
             results += [("EUR", 0.0, 0.0), ("USD", 0.0, 0.0)]
@@ -356,12 +416,11 @@ def draw(epd, weather, ts, group_name, tickers):
     fb = epd.fb
     fb.fill(1)
 
-    # top bar
     fb.fill_rect(0, 0, WIDTH, 16, 0)
     fb.text(ts, 4, 4, 1)
-    fb.text(SSID, WIDTH - len(SSID) * 8 - 4, 4, 1)
+    ssid_x = WIDTH - len(SSID) * 8 - 4
+    fb.text(SSID, ssid_x, 4, 1)
 
-    # location
     loc = LOCATION_LABEL
     fb.text(loc, (WIDTH - len(loc) * 8) // 2, 20, 0)
     fb.hline(4, 32, WIDTH - 8, 0)
@@ -388,7 +447,6 @@ def draw(epd, weather, ts, group_name, tickers):
     upd = "Updated " + ts
     fb.text(upd, (WIDTH - len(upd) * 8) // 2, 128, 0)
 
-    # ticker section
     fb.hline(0, 141, WIDTH, 0)
     fb.hline(0, 142, WIDTH, 0)
     fb.fill_rect(0, 143, WIDTH, 14, 0)
@@ -408,7 +466,7 @@ def draw(epd, weather, ts, group_name, tickers):
 
 
 # ── startup ───────────────────────────────────────────────────────────────────
-print("init...")
+print("init... v" + VERSION)
 epd = EPD()
 
 epd.fb.fill(1)
@@ -422,6 +480,7 @@ if connect_wifi():
         print("ntp ok")
     except Exception as e:
         print("ntp fail:", e)
+    ota_check(epd)
 
 # ── main loop ─────────────────────────────────────────────────────────────────
 weather      = None

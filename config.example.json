@@ -1,0 +1,9 @@
+{
+  "ssid": "YOUR_WIFI_SSID",
+  "password": "YOUR_WIFI_PASSWORD",
+  "tz_offset": 3600,
+  "lat": 52.19,
+  "lon": -8.87,
+  "tz": "Europe%2FDublin",
+  "label": "Freemount, Cork"
+}
