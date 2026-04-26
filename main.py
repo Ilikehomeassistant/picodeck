@@ -2,7 +2,8 @@ import network, socket, ujson, ntptime, time, gc
 from machine import Pin, SoftSPI, reset
 import framebuf
 
-VERSION = "1.1"
+VERSION = "1.2"
+BETA    = True
 
 try:
     import ssl
@@ -88,8 +89,8 @@ class EPD:
         self._cmd(0x4F); self._data(0x00, 0x00)
         self._cmd(0x11); self._data(0x03)
 
-    def _turn_on(self):
-        self._cmd(0x22); self._data(0xF7)
+    def _turn_on(self, mode):
+        self._cmd(0x22); self._data(mode)
         self._cmd(0x20); self._wait()
 
     def _write(self, cmd, data):
@@ -97,9 +98,31 @@ class EPD:
         self._cmd(cmd); self._bulk(data)
 
     def show(self):
+        """Full refresh — clears display then redraws. ~2-3s."""
         self._write(0x26, bytes([0xFF] * (WIDTH * HEIGHT // 8)))
         self._write(0x24, self.buf)
-        self._turn_on()
+        self._turn_on(0xF7)
+
+    def show_partial(self):
+        """Partial refresh — fast update, no full clear. ~0.5s. May ghost over time."""
+        self._write(0x24, self.buf)
+        self._turn_on(0xFF)
+
+
+# ── scaled text ───────────────────────────────────────────────────────────────
+
+def draw_big(fb, text, x, y, scale, color):
+    """Draw text scaled up by integer factor."""
+    for ci, ch in enumerate(text):
+        cbuf = bytearray(8)
+        cfb = framebuf.FrameBuffer(cbuf, 8, 8, framebuf.MONO_HLSB)
+        cfb.fill(1)
+        cfb.text(ch, 0, 0, 0)
+        for row in range(8):
+            for col in range(8):
+                if cfb.pixel(col, row) == 0:
+                    fb.fill_rect(x + ci * 8 * scale + col * scale,
+                                 y + row * scale, scale, scale, color)
 
 
 # ── networking ────────────────────────────────────────────────────────────────
@@ -109,7 +132,6 @@ def connect_wifi():
     wlan.active(True)
     if wlan.isconnected():
         return True
-    print("connecting wifi...")
     wlan.connect(SSID, PASSWORD)
     for _ in range(30):
         if wlan.isconnected():
@@ -208,10 +230,8 @@ def ota_check(epd):
             return
         print("OTA: update available %s -> %s" % (VERSION, remote))
         epd.fb.fill(1)
-        epd.fb.fill_rect(0, 0, WIDTH, 16, 0)
-        msg = "Update v" + remote
-        epd.fb.text(msg, (WIDTH - len(msg) * 8) // 2, 4, 1)
-        epd.fb.text("Downloading...", (WIDTH - 13 * 8) // 2, 120, 0)
+        msg = "Updating v" + remote
+        epd.fb.text(msg, (WIDTH - len(msg) * 8) // 2, HEIGHT // 2 - 4, 0)
         epd.show()
         gc.collect()
         new_code = https_body(_OTA_HOST, _OTA_BASE + "/main.py")
@@ -223,12 +243,6 @@ def ota_check(epd):
         with open("version.txt", "w") as f:
             f.write(remote)
         print("OTA: done, rebooting")
-        epd.fb.fill(1)
-        epd.fb.fill_rect(0, 0, WIDTH, 16, 0)
-        done = "Updated! v" + remote
-        epd.fb.text(done, (WIDTH - len(done) * 8) // 2, 4, 1)
-        epd.fb.text("Rebooting...", (WIDTH - 12 * 8) // 2, 120, 0)
-        epd.show()
         time.sleep(2)
         reset()
     except Exception as e:
@@ -263,16 +277,13 @@ def _yf_refresh():
             return False
         end = buf.find(b";", idx + 12)
         cookie = buf[idx + 12:end].decode()
-
-        raw = https_raw("query2.finance.yahoo.com",
-                        "/v1/test/getcrumb", cookie)
+        raw = https_raw("query2.finance.yahoo.com", "/v1/test/getcrumb", cookie)
         if not raw:
             return False
         crumb = raw[raw.find(b"\r\n\r\n") + 4:].strip().decode()
         if not crumb or crumb.startswith("<"):
             print("bad crumb:", crumb[:30])
             return False
-
         _yf["cookie"] = cookie
         _yf["crumb"]  = crumb
         print("yahoo auth ok")
@@ -316,7 +327,6 @@ def fetch_yahoo(symbols, names):
 
 def fetch_weather():
     try:
-        # Use HTTPS; field is now weather_code (renamed from weathercode)
         body = https_body("api.open-meteo.com",
             "/v1/forecast?latitude=%s&longitude=%s"
             "&current=temperature_2m,weather_code,windspeed_10m,"
@@ -372,8 +382,7 @@ def fetch_markets():
         results.append(("NDAQ", 0.0, 0.0))
     gc.collect()
     try:
-        body = https_body("api.frankfurter.app",
-                          "/latest?from=EUR&to=USD,GBP")
+        body = https_body("api.frankfurter.app", "/latest?from=EUR&to=USD,GBP")
         if body:
             d = ujson.loads(body)["rates"]
             eur_usd = d["USD"]
@@ -394,7 +403,7 @@ GROUPS = [
 ]
 
 
-# ── display ───────────────────────────────────────────────────────────────────
+# ── main display draw ─────────────────────────────────────────────────────────
 
 def fmt_price(val, sym):
     if sym == "BTC":
@@ -418,8 +427,7 @@ def draw(epd, weather, ts, group_name, tickers):
 
     fb.fill_rect(0, 0, WIDTH, 16, 0)
     fb.text(ts, 4, 4, 1)
-    ssid_x = WIDTH - len(SSID) * 8 - 4
-    fb.text(SSID, ssid_x, 4, 1)
+    fb.text(SSID, WIDTH - len(SSID) * 8 - 4, 4, 1)
 
     loc = LOCATION_LABEL
     fb.text(loc, (WIDTH - len(loc) * 8) // 2, 20, 0)
@@ -469,18 +477,55 @@ def draw(epd, weather, ts, group_name, tickers):
 print("init... v" + VERSION)
 epd = EPD()
 
+# Connecting screen — full refresh base
 epd.fb.fill(1)
-epd.fb.fill_rect(0, 0, WIDTH, 16, 0)
-epd.fb.text("Connecting...", (WIDTH - 13 * 8) // 2, 4, 1)
+label = "Connecting"
+lx = (WIDTH - len(label) * 8) // 2
+ly = HEIGHT // 2 - 8
+epd.fb.text(label, lx, ly, 0)
 epd.show()
 
-if connect_wifi():
-    try:
-        ntptime.settime()
-        print("ntp ok")
-    except Exception as e:
-        print("ntp fail:", e)
-    ota_check(epd)
+# Animated dots while connecting
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+if not wlan.isconnected():
+    wlan.connect(SSID, PASSWORD)
+
+dot_states = ["   ", ".  ", ".. ", "..."]
+dot_x = lx + len(label) * 8 + 2
+ds = 0
+for _ in range(30):
+    ds = (ds + 1) % len(dot_states)
+    epd.fb.fill_rect(dot_x, ly, 26, 8, 1)
+    epd.fb.text(dot_states[ds], dot_x, ly, 0)
+    epd.show_partial()
+    if wlan.isconnected():
+        break
+    time.sleep(1)
+
+# PicoDeck splash screen
+epd.fb.fill(1)
+# "Pico" scale 3 = 96px wide, 24px tall
+pw = 4 * 8 * 3
+draw_big(epd.fb, "Pico", (WIDTH - pw) // 2, 86, 3, 0)
+draw_big(epd.fb, "Deck", (WIDTH - pw) // 2, 86 + 24 + 4, 3, 0)
+ver_str = "version " + VERSION
+epd.fb.text(ver_str, (WIDTH - len(ver_str) * 8) // 2, 150, 0)
+if BETA:
+    warn = "Warning! Beta build!"
+    epd.fb.fill_rect(0, HEIGHT - 16, WIDTH, 16, 0)
+    epd.fb.text(warn, (WIDTH - len(warn) * 8) // 2, HEIGHT - 12, 1)
+epd.show()
+
+# NTP + OTA while splash is visible
+try:
+    ntptime.settime()
+    print("ntp ok")
+except Exception as e:
+    print("ntp fail:", e)
+
+ota_check(epd)
+time.sleep(2)
 
 # ── main loop ─────────────────────────────────────────────────────────────────
 weather      = None
