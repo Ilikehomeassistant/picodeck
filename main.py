@@ -2,7 +2,7 @@ import network, socket, ujson, ntptime, time, gc
 from machine import Pin, SoftSPI, reset
 import framebuf
 
-VERSION = "1.3"
+VERSION = "1.4"
 BETA    = True
 
 try:
@@ -41,6 +41,8 @@ WEATHER_LAT    = _cfg.get("lat", 0.0)
 WEATHER_LON    = _cfg.get("lon", 0.0)
 WEATHER_TZ     = _cfg.get("tz", "UTC")
 LOCATION_LABEL = _cfg.get("label", "PicoDeck")
+
+_eur_usd_rate  = None  # cached EUR/USD rate, updated when stocks are fetched
 
 
 # ── display driver ────────────────────────────────────────────────────────────
@@ -98,13 +100,12 @@ class EPD:
         self._cmd(cmd); self._bulk(data)
 
     def show(self):
-        """Full refresh — clears display then redraws. ~2-3s."""
         self._write(0x26, bytes([0xFF] * (WIDTH * HEIGHT // 8)))
         self._write(0x24, self.buf)
         self._turn_on(0xF7)
 
     def show_partial(self):
-        """Partial refresh — fast update, no full clear. ~0.5s. May ghost over time."""
+        """Fast update — no full clear. ~0.5s. May ghost slightly over time."""
         self._write(0x24, self.buf)
         self._turn_on(0xFF)
 
@@ -112,7 +113,6 @@ class EPD:
 # ── scaled text ───────────────────────────────────────────────────────────────
 
 def draw_big(fb, text, x, y, scale, color):
-    """Draw text scaled up by integer factor."""
     for ci, ch in enumerate(text):
         cbuf = bytearray(8)
         cfb = framebuf.FrameBuffer(cbuf, 8, 8, framebuf.MONO_HLSB)
@@ -123,6 +123,66 @@ def draw_big(fb, text, x, y, scale, color):
                 if cfb.pixel(col, row) == 0:
                     fb.fill_rect(x + ci * 8 * scale + col * scale,
                                  y + row * scale, scale, scale, color)
+
+
+# ── weather icons ─────────────────────────────────────────────────────────────
+
+def weather_icon(fb, x, y, code):
+    """Draw a 16x16 weather icon at (x, y)."""
+    c = 0
+    if code == 0:  # clear sky — sun with rays
+        fb.fill_rect(x+5, y+3, 6, 10, c)
+        fb.fill_rect(x+3, y+5, 10, 6, c)
+        fb.pixel(x+4,  y+4,  c); fb.pixel(x+11, y+4,  c)
+        fb.pixel(x+4,  y+11, c); fb.pixel(x+11, y+11, c)
+        fb.pixel(x+7,  y+0,  c); fb.pixel(x+8,  y+0,  c)
+        fb.pixel(x+7,  y+15, c); fb.pixel(x+8,  y+15, c)
+        fb.pixel(x+0,  y+7,  c); fb.pixel(x+0,  y+8,  c)
+        fb.pixel(x+15, y+7,  c); fb.pixel(x+15, y+8,  c)
+        fb.pixel(x+2,  y+2,  c); fb.pixel(x+13, y+2,  c)
+        fb.pixel(x+2,  y+13, c); fb.pixel(x+13, y+13, c)
+    elif code in (1, 2):  # partly cloudy — small sun + cloud
+        fb.fill_rect(x+9, y+0, 4,  7,  c)
+        fb.fill_rect(x+7, y+2, 8,  3,  c)
+        fb.pixel(x+6,  y+1,  c); fb.pixel(x+13, y+1,  c)
+        fb.pixel(x+6,  y+7,  c); fb.pixel(x+13, y+7,  c)
+        fb.fill_rect(x+1, y+8, 12, 6,  c)
+        fb.fill_rect(x+3, y+6, 6,  3,  c)
+        fb.fill_rect(x+7, y+5, 4,  4,  c)
+    elif code == 3:  # overcast — full cloud
+        fb.fill_rect(x+1, y+7, 14, 7, c)
+        fb.fill_rect(x+3, y+5, 8,  4, c)
+        fb.fill_rect(x+7, y+3, 5,  5, c)
+    elif code in (45, 48):  # fog — horizontal lines
+        fb.hline(x+1, y+3,  14, c)
+        fb.hline(x+3, y+7,  10, c)
+        fb.hline(x+1, y+11, 14, c)
+    elif code in (51, 53, 55):  # drizzle — cloud + light dots
+        fb.fill_rect(x+1, y+2, 14, 6, c)
+        fb.fill_rect(x+3, y+0, 8,  4, c)
+        fb.pixel(x+3,  y+10, c); fb.pixel(x+7,  y+12, c)
+        fb.pixel(x+11, y+10, c); fb.pixel(x+5,  y+14, c)
+        fb.pixel(x+9,  y+14, c)
+    elif code in (61, 63, 65, 80, 81, 82):  # rain — cloud + lines
+        fb.fill_rect(x+1, y+2, 14, 6, c)
+        fb.fill_rect(x+3, y+0, 8,  4, c)
+        fb.vline(x+3,  y+10, 5, c)
+        fb.vline(x+8,  y+10, 5, c)
+        fb.vline(x+13, y+10, 5, c)
+    elif code in (71, 73, 75):  # snow — cloud + asterisk dots
+        fb.fill_rect(x+1, y+2, 14, 6, c)
+        fb.fill_rect(x+3, y+0, 8,  4, c)
+        for sx, sy in [(3,11),(3,13),(8,10),(8,12),(8,14),(13,11),(13,13)]:
+            fb.pixel(x+sx, y+sy, c)
+    elif code == 95:  # thunderstorm — cloud + bolt
+        fb.fill_rect(x+1, y+1, 14, 6, c)
+        fb.fill_rect(x+3, y+0, 8,  3, c)
+        fb.line(x+10, y+8,  x+6,  y+12, c)
+        fb.hline(x+6,  y+12, 5,       c)
+        fb.line(x+10, y+12, x+6,  y+15, c)
+    else:  # unknown
+        fb.rect(x+3, y+3, 10, 10, c)
+        fb.text("?", x+4, y+4, c)
 
 
 # ── networking ────────────────────────────────────────────────────────────────
@@ -217,6 +277,75 @@ def https_body(host, path, cookie=None):
 _OTA_HOST = "raw.githubusercontent.com"
 _OTA_BASE = "/Ilikehomeassistant/picodeck/main"
 
+_BAR_X = 10
+_BAR_Y = 80
+_BAR_W = WIDTH - 20
+_BAR_H = 12
+
+
+def _ota_stream(epd, host, path):
+    """Stream HTTPS download with live progress bar. Returns bytes or None."""
+    if not HAS_SSL:
+        return None
+    try:
+        addr = socket.getaddrinfo(host, 443)[0][-1]
+        sock = socket.socket()
+        sock.settimeout(30)
+        sock.connect(addr)
+        s = ssl.wrap_socket(sock, server_hostname=host)
+        s.write(("GET %s HTTP/1.0\r\nHost: %s\r\n"
+                 "User-Agent: Mozilla/5.0\r\n"
+                 "Accept: */*\r\nAccept-Encoding: identity\r\n"
+                 "Connection: close\r\n\r\n" % (path, host)).encode())
+
+        # Read headers
+        hbuf = b""
+        while b"\r\n\r\n" not in hbuf:
+            c = s.read(256)
+            if not c:
+                break
+            hbuf += c
+
+        total = 0
+        for line in hbuf.split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                total = int(line.split(b":")[1].strip())
+                break
+
+        sep    = hbuf.find(b"\r\n\r\n") + 4
+        chunks = [hbuf[sep:]]
+        done   = len(chunks[0])
+        last_pct = -1
+
+        while True:
+            c = s.read(512)
+            if not c:
+                break
+            chunks.append(c)
+            done += len(c)
+            if total > 0:
+                pct = min(done * 100 // total, 100)
+                if pct != last_pct:
+                    last_pct = pct
+                    filled = (pct * (_BAR_W - 2)) // 100
+                    epd.fb.fill_rect(_BAR_X + 1, _BAR_Y + 1, _BAR_W - 2, _BAR_H - 2, 1)
+                    if filled > 0:
+                        epd.fb.fill_rect(_BAR_X + 1, _BAR_Y + 1, filled, _BAR_H - 2, 0)
+                    pct_str = "%d%%" % pct
+                    epd.fb.fill_rect(0, _BAR_Y + _BAR_H + 2, WIDTH, 10, 1)
+                    epd.fb.text(pct_str, (WIDTH - len(pct_str) * 8) // 2,
+                                _BAR_Y + _BAR_H + 2, 0)
+                    epd.show_partial()
+
+        s.close()
+        body = b"".join(chunks)
+        if body[:5] in (b"<html", b"<!DOC"):
+            return None
+        return body
+    except Exception as e:
+        print("OTA stream error:", e)
+        return None
+
 
 def ota_check(epd):
     try:
@@ -228,13 +357,20 @@ def ota_check(epd):
         if remote == VERSION:
             print("OTA: up to date (%s)" % VERSION)
             return
-        print("OTA: update available %s -> %s" % (VERSION, remote))
+
+        print("OTA: %s -> %s" % (VERSION, remote))
         epd.fb.fill(1)
-        msg = "Updating v" + remote
-        epd.fb.text(msg, (WIDTH - len(msg) * 8) // 2, HEIGHT // 2 - 4, 0)
+        epd.fb.fill_rect(0, 0, WIDTH, 16, 0)
+        hdr = "Updating PicoDeck"
+        epd.fb.text(hdr, (WIDTH - len(hdr) * 8) // 2, 4, 1)
+        ver_str = "v%s  ->  v%s" % (VERSION, remote)
+        epd.fb.text(ver_str, (WIDTH - len(ver_str) * 8) // 2, 28, 0)
+        epd.fb.rect(_BAR_X, _BAR_Y, _BAR_W, _BAR_H, 0)
+        epd.fb.text("0%", (WIDTH - 16) // 2, _BAR_Y + _BAR_H + 2, 0)
         epd.show()
+
         gc.collect()
-        new_code = https_body(_OTA_HOST, _OTA_BASE + "/main.py")
+        new_code = _ota_stream(epd, _OTA_HOST, _OTA_BASE + "/main.py")
         if not new_code:
             print("OTA: download failed")
             return
@@ -242,7 +378,12 @@ def ota_check(epd):
             f.write(new_code)
         with open("version.txt", "w") as f:
             f.write(remote)
-        print("OTA: done, rebooting")
+
+        epd.fb.fill(1)
+        msg = "Updated!  Rebooting..."
+        epd.fb.text(msg, (WIDTH - len(msg) * 8) // 2, HEIGHT // 2 - 4, 0)
+        epd.show()
+        print("OTA done, rebooting")
         time.sleep(2)
         reset()
     except Exception as e:
@@ -366,52 +507,39 @@ def fetch_crypto():
 
 
 def fetch_stocks():
-    return fetch_yahoo(["NVDA", "GOOGL", "AAPL"],
-                       ["NVDA", "GOOGL", "AAPL"])
-
-
-def fetch_markets():
-    results = []
-    try:
-        yf = fetch_yahoo(["^IXIC"], ["NDAQ"])
-        if yf:
-            results.extend(yf)
-        else:
-            results.append(("NDAQ", 0.0, 0.0))
-    except:
-        results.append(("NDAQ", 0.0, 0.0))
-    gc.collect()
-    try:
-        body = https_body("api.frankfurter.app", "/latest?from=EUR&to=USD,GBP")
-        if body:
-            d = ujson.loads(body)["rates"]
-            eur_usd = d["USD"]
-            results.append(("EUR",  eur_usd,             0.0))
-            results.append(("USD",  round(1/eur_usd, 4), 0.0))
-        else:
-            results += [("EUR", 0.0, 0.0), ("USD", 0.0, 0.0)]
-    except Exception as e:
-        print("forex error:", e)
-        results += [("EUR", 0.0, 0.0), ("USD", 0.0, 0.0)]
-    return results if any(r[1] != 0 for r in results) else None
+    global _eur_usd_rate
+    # Batch EURUSD=X with stocks to get conversion rate in one request
+    result = fetch_yahoo(
+        ["EURUSD=X", "NVDA", "GOOGL", "AAPL"],
+        ["EURUSD",   "NVDA", "GOOGL", "AAPL"]
+    )
+    if not result:
+        return None
+    for sym, price, _ in result:
+        if sym == "EURUSD" and price > 0:
+            _eur_usd_rate = price
+            break
+    return [(s, p, c) for s, p, c in result if s != "EURUSD"]
 
 
 GROUPS = [
-    ("CRYPTO",  fetch_crypto),
-    ("STOCKS",  fetch_stocks),
-    ("MARKETS", fetch_markets),
+    ("CRYPTO", fetch_crypto),
+    ("STOCKS", fetch_stocks),
 ]
 
 
-# ── main display draw ─────────────────────────────────────────────────────────
+# ── display ───────────────────────────────────────────────────────────────────
 
 def fmt_price(val, sym):
     if sym == "BTC":
         return "$%d" % round(val)
-    elif sym in ("LTC", "ETH", "NVDA", "GOOGL", "AAPL"):
+    elif sym in ("LTC", "ETH"):
         return "$%.2f" % val
-    elif sym == "NDAQ":
-        return "%d" % round(val)
+    elif sym in ("NVDA", "GOOGL", "AAPL"):
+        if _eur_usd_rate and _eur_usd_rate > 0:
+            eur = val / _eur_usd_rate
+            return "E%d" % round(eur) if eur >= 100 else "E%.2f" % eur
+        return "$%.2f" % val
     else:
         return "%.4f" % val
 
@@ -425,10 +553,12 @@ def draw(epd, weather, ts, group_name, tickers):
     fb = epd.fb
     fb.fill(1)
 
+    # top bar
     fb.fill_rect(0, 0, WIDTH, 16, 0)
     fb.text(ts, 4, 4, 1)
     fb.text(SSID, WIDTH - len(SSID) * 8 - 4, 4, 1)
 
+    # location
     loc = LOCATION_LABEL
     fb.text(loc, (WIDTH - len(loc) * 8) // 2, 20, 0)
     fb.hline(4, 32, WIDTH - 8, 0)
@@ -436,7 +566,8 @@ def draw(epd, weather, ts, group_name, tickers):
     if weather:
         cond = WMO.get(weather["code"], "Code %d" % weather["code"])
         temp = str(weather["temp"]) + " C"
-        fb.text(cond, (WIDTH - len(cond) * 8) // 2, 40, 0)
+        weather_icon(fb, 2, 35, weather["code"])
+        fb.text(cond, 22, 40, 0)
         tx = (WIDTH - len(temp) * 8) // 2
         for dx in range(2):
             for dy in range(2):
@@ -455,6 +586,7 @@ def draw(epd, weather, ts, group_name, tickers):
     upd = "Updated " + ts
     fb.text(upd, (WIDTH - len(upd) * 8) // 2, 128, 0)
 
+    # ticker section
     fb.hline(0, 141, WIDTH, 0)
     fb.hline(0, 142, WIDTH, 0)
     fb.fill_rect(0, 143, WIDTH, 14, 0)
@@ -503,12 +635,11 @@ for _ in range(30):
         break
     time.sleep(1)
 
-# Reset display state after partial refreshes before doing full refresh
+# Reset display state after partial refreshes before full refresh
 epd._init()
 
 # PicoDeck splash screen
 epd.fb.fill(1)
-# "Pico" scale 3 = 96px wide, 24px tall
 pw = 4 * 8 * 3
 draw_big(epd.fb, "Pico", (WIDTH - pw) // 2, 86, 3, 0)
 draw_big(epd.fb, "Deck", (WIDTH - pw) // 2, 86 + 24 + 4, 3, 0)
@@ -532,7 +663,7 @@ time.sleep(2)
 
 # ── main loop ─────────────────────────────────────────────────────────────────
 weather      = None
-ticker_cache = [None, None, None]
+ticker_cache = [None, None]
 group_idx    = 0
 last_min     = -1
 
@@ -559,6 +690,6 @@ while True:
         draw(epd, weather, ts, gname, ticker_cache[group_idx])
         epd.show()
 
-        group_idx = (group_idx + 1) % 3
+        group_idx = (group_idx + 1) % len(GROUPS)
 
     time.sleep_ms(500)
