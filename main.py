@@ -2,8 +2,41 @@ import network, socket, ujson, ntptime, time, gc
 from machine import Pin, SoftSPI, reset
 import framebuf
 
-VERSION = "1.6"
+VERSION = "1.7"
 BETA    = True
+
+# ── staged OTA apply (runs before anything else) ──────────────────────────────
+def _apply_staged():
+    import os as _os
+    try:
+        _os.stat("update.py")
+    except OSError:
+        return  # no staged update waiting
+    print("applying staged OTA update...")
+    try:
+        with open("update.py", "rb") as f:
+            data = f.read()
+        with open("main.py", "wb") as f:
+            f.write(data)
+        _os.remove("update.py")
+        print("done, rebooting")
+        time.sleep(2)
+        reset()
+    except Exception as e:
+        print("staged apply error:", e)
+        try:
+            import os; os.remove("update.py")
+        except:
+            pass
+
+_apply_staged()
+
+# Write our version to disk — OTA compares against this file, not the constant
+try:
+    with open("version.txt", "w") as f:
+        f.write(VERSION)
+except:
+    pass
 
 try:
     import ssl
@@ -401,16 +434,9 @@ def ota_check(epd):
         if not new_code:
             print("OTA: download failed")
             return
-        with open("main.py", "wb") as f:
+        # Write to staging file — main.py is replaced safely on next boot
+        with open("update.py", "wb") as f:
             f.write(new_code)
-        with open("version.txt", "w") as f:
-            f.write(remote)
-        # Flush filesystem to flash before hard reset
-        try:
-            import uos
-            uos.sync()
-        except:
-            pass
 
         epd.fb.fill(1)
         msg = "Updated!  Rebooting..."
