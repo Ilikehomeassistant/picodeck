@@ -2,7 +2,7 @@ import network, socket, ujson, ntptime, time, gc
 from machine import Pin, SoftSPI, reset
 import framebuf
 
-VERSION = "1.4"
+VERSION = "1.5"
 BETA    = True
 
 try:
@@ -123,6 +123,25 @@ def draw_big(fb, text, x, y, scale, color):
                 if cfb.pixel(col, row) == 0:
                     fb.fill_rect(x + ci * 8 * scale + col * scale,
                                  y + row * scale, scale, scale, color)
+
+
+# ── € glyph (not in built-in 8x8 font) ──────────────────────────────────────
+# Custom 8x8 bitmap: 0=black, 1=white (MONO_HLSB)
+_EUR_BLACK = bytearray(b'\x83\x7D\x7F\x03\x7F\x03\x7D\x83')
+_EUR_WHITE = bytearray(b'\x7C\x82\x80\xFC\x80\xFC\x82\x7C')
+
+def fb_text(fb, s, x, y, c):
+    """Like fb.text() but renders the € character correctly."""
+    cx = x
+    glyph = _EUR_BLACK if c == 0 else _EUR_WHITE
+    key   = 1 - c
+    for ch in s:
+        if ch == '€':  # €
+            gfb = framebuf.FrameBuffer(glyph, 8, 8, framebuf.MONO_HLSB)
+            fb.blit(gfb, cx, y, key)
+        else:
+            fb.text(ch, cx, y, c)
+        cx += 8
 
 
 # ── weather icons ─────────────────────────────────────────────────────────────
@@ -492,14 +511,14 @@ def fetch_crypto():
     try:
         body = https_body("api.coingecko.com",
             "/api/v3/simple/price?ids=bitcoin,litecoin,ethereum"
-            "&vs_currencies=usd&include_24hr_change=true")
+            "&vs_currencies=eur&include_24hr_change=true")
         if not body:
             return None
         d = ujson.loads(body)
         return [
-            ("BTC", d["bitcoin"]["usd"],  d["bitcoin"]["usd_24h_change"]),
-            ("LTC", d["litecoin"]["usd"], d["litecoin"]["usd_24h_change"]),
-            ("ETH", d["ethereum"]["usd"], d["ethereum"]["usd_24h_change"]),
+            ("BTC", d["bitcoin"]["eur"],  d["bitcoin"]["eur_24h_change"]),
+            ("LTC", d["litecoin"]["eur"], d["litecoin"]["eur_24h_change"]),
+            ("ETH", d["ethereum"]["eur"], d["ethereum"]["eur_24h_change"]),
         ]
     except Exception as e:
         print("crypto error:", e)
@@ -532,13 +551,13 @@ GROUPS = [
 
 def fmt_price(val, sym):
     if sym == "BTC":
-        return "$%d" % round(val)
+        return "€%d" % round(val)
     elif sym in ("LTC", "ETH"):
-        return "$%.2f" % val
+        return "€%.2f" % val
     elif sym in ("NVDA", "GOOGL", "AAPL"):
         if _eur_usd_rate and _eur_usd_rate > 0:
             eur = val / _eur_usd_rate
-            return "E%d" % round(eur) if eur >= 100 else "E%.2f" % eur
+            return "€%d" % round(eur) if eur >= 100 else "€%.2f" % eur
         return "$%.2f" % val
     else:
         return "%.4f" % val
@@ -598,8 +617,8 @@ def draw(epd, weather, ts, group_name, tickers):
             y = 163 + i * 17
             p_str = fmt_price(price, sym)
             c_str = fmt_change(change)
-            fb.text(sym,   4, y, 0)
-            fb.text(p_str, 52, y, 0)
+            fb.text(sym,       4, y, 0)
+            fb_text(fb, p_str, 52, y, 0)
             fb.text(c_str, WIDTH - len(c_str) * 8 - 4, y, 0)
     else:
         fb.text("No data", (WIDTH - 7 * 8) // 2, 175, 0)
