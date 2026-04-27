@@ -2,7 +2,7 @@ import network, socket, ujson, ntptime, time, gc
 from machine import Pin, SoftSPI, reset
 import framebuf
 
-VERSION = "1.5"
+VERSION = "1.6"
 BETA    = True
 
 try:
@@ -368,21 +368,29 @@ def _ota_stream(epd, host, path):
 
 def ota_check(epd):
     try:
+        # Read local version from file — more reliable than the hardcoded constant
+        local_ver = VERSION
+        try:
+            with open("version.txt") as f:
+                local_ver = f.read().strip()
+        except:
+            pass  # no version.txt yet, fall back to code constant
+
         ver_body = https_body(_OTA_HOST, _OTA_BASE + "/version.txt")
         if not ver_body:
             print("OTA: could not fetch version")
             return
         remote = ver_body.strip().decode()
-        if remote == VERSION:
-            print("OTA: up to date (%s)" % VERSION)
+        if remote == local_ver:
+            print("OTA: up to date (%s)" % local_ver)
             return
 
-        print("OTA: %s -> %s" % (VERSION, remote))
+        print("OTA: %s -> %s" % (local_ver, remote))
         epd.fb.fill(1)
         epd.fb.fill_rect(0, 0, WIDTH, 16, 0)
         hdr = "Updating PicoDeck"
         epd.fb.text(hdr, (WIDTH - len(hdr) * 8) // 2, 4, 1)
-        ver_str = "v%s  ->  v%s" % (VERSION, remote)
+        ver_str = "v%s  ->  v%s" % (local_ver, remote)
         epd.fb.text(ver_str, (WIDTH - len(ver_str) * 8) // 2, 28, 0)
         epd.fb.rect(_BAR_X, _BAR_Y, _BAR_W, _BAR_H, 0)
         epd.fb.text("0%", (WIDTH - 16) // 2, _BAR_Y + _BAR_H + 2, 0)
@@ -397,13 +405,19 @@ def ota_check(epd):
             f.write(new_code)
         with open("version.txt", "w") as f:
             f.write(remote)
+        # Flush filesystem to flash before hard reset
+        try:
+            import uos
+            uos.sync()
+        except:
+            pass
 
         epd.fb.fill(1)
         msg = "Updated!  Rebooting..."
         epd.fb.text(msg, (WIDTH - len(msg) * 8) // 2, HEIGHT // 2 - 4, 0)
         epd.show()
         print("OTA done, rebooting")
-        time.sleep(2)
+        time.sleep(3)
         reset()
     except Exception as e:
         print("OTA error:", e)
