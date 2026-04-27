@@ -1,6 +1,6 @@
 import network, socket, ujson, ntptime, time, gc
 from machine import Pin, SoftSPI, reset
-import framebuf
+import framebuf, ble_keyboard
 
 VERSION = "1.8"
 BETA    = True
@@ -76,6 +76,8 @@ WEATHER_TZ     = _cfg.get("tz", "UTC")
 LOCATION_LABEL = _cfg.get("label", "PicoDeck")
 
 _eur_usd_rate  = None  # cached EUR/USD rate, updated when stocks are fetched
+_text_buf      = ""   # BLE keyboard text input buffer
+_partial_done  = False
 
 
 # ── display driver ────────────────────────────────────────────────────────────
@@ -663,6 +665,31 @@ def draw(epd, weather, ts, group_name, tickers):
     else:
         fb.text("No data", (WIDTH - 7 * 8) // 2, 175, 0)
 
+    # ── BLE keyboard input area ───────────────────────────────────────────────
+    fb.hline(0, 208, WIDTH, 0)
+    st  = ble_keyboard.status()
+    if st != "ready":
+        fb.text("kbd: " + st, 2, 212, 0)
+    kbd_line = "> " + _text_buf
+    max_chars = (WIDTH - 4) // 8
+    if len(kbd_line) > max_chars:
+        kbd_line = "> " + _text_buf[-(max_chars - 2):]
+    fb.text(kbd_line, 2, 226, 0)
+
+
+# ── BLE keyboard text area partial refresh ───────────────────────────────────
+def _update_text_area(epd):
+    global _partial_done
+    y = 226
+    epd.fb.fill_rect(0, 209, WIDTH, HEIGHT - 209, 1)
+    kbd_line = "> " + _text_buf
+    max_chars = (WIDTH - 4) // 8
+    if len(kbd_line) > max_chars:
+        kbd_line = "> " + _text_buf[-(max_chars - 2):]
+    epd.fb.text(kbd_line, 2, y, 0)
+    epd.show_partial()
+    _partial_done = True
+
 
 # ── startup ───────────────────────────────────────────────────────────────────
 print("init... v" + VERSION)
@@ -720,6 +747,8 @@ except Exception as e:
 ota_check(epd)
 time.sleep(2)
 
+ble_keyboard.init()
+
 # ── main loop ─────────────────────────────────────────────────────────────────
 weather      = None
 ticker_cache = [None, None]
@@ -747,8 +776,22 @@ while True:
         ts = get_time()
         print("tick:", ts, gname, ticker_cache[group_idx])
         draw(epd, weather, ts, gname, ticker_cache[group_idx])
+        if _partial_done:
+            epd._init()
         epd.show()
+        _partial_done = False
 
         group_idx = (group_idx + 1) % len(GROUPS)
 
-    time.sleep_ms(500)
+    # handle BLE keyboard input between screen refreshes
+    ch = ble_keyboard.read_char()
+    if ch is not None:
+        if ch == '\x08':           # backspace
+            _text_buf = _text_buf[:-1]
+        elif ch == '\r':           # enter — clear line (future: run command)
+            _text_buf = ""
+        elif 0x20 <= ord(ch) < 0x7F:
+            _text_buf += ch
+        _update_text_area(epd)
+
+    time.sleep_ms(100)
