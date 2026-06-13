@@ -1,15 +1,9 @@
 """
-PicoDeck V2 — Graphics Test Screen
+PicoDeck — Project ArkLight
+Prototype boot screen + graphics test.
 Branch: testing — never merged to main.
-
-Layout (176 x 264):
-  y=  0-13   Header bar
-  y= 14-69   Greyscale / dither bands  (4 x 14 px)
-  y= 70      Separator
-  y= 71-125  Shapes                    (55 px)
-  y=126      Separator
-  y=127-263  Text sizes                (137 px)
 """
+import math
 from machine import Pin, SoftSPI
 import framebuf, time
 
@@ -79,8 +73,19 @@ class EPD:
 
 # ── drawing primitives ────────────────────────────────────────────────────────
 
+def draw_big(fb, text, x, y, scale, color):
+    for ci, ch in enumerate(text):
+        cbuf = bytearray(8)
+        cfb = framebuf.FrameBuffer(cbuf, 8, 8, framebuf.MONO_HLSB)
+        cfb.fill(1); cfb.text(ch, 0, 0, 0)
+        for row in range(8):
+            for col in range(8):
+                if cfb.pixel(col, row) == 0:
+                    fb.fill_rect(x + ci*8*scale + col*scale,
+                                 y + row*scale, scale, scale, color)
+
+
 def fill_dither(fb, x, y, w, h, level):
-    """Fill rect with dithered grey. level: 0=black 1=dk-grey 2=lt-grey 3=white"""
     if level == 0:
         fb.fill_rect(x, y, w, h, 0)
     elif level == 3:
@@ -120,36 +125,80 @@ def circle(fb, cx, cy, r, c, fill=False):
             err -= 2 * x + 1
 
 
-def draw_big(fb, text, x, y, scale, color):
-    for ci, ch in enumerate(text):
-        cbuf = bytearray(8)
-        cfb = framebuf.FrameBuffer(cbuf, 8, 8, framebuf.MONO_HLSB)
-        cfb.fill(1); cfb.text(ch, 0, 0, 0)
-        for row in range(8):
-            for col in range(8):
-                if cfb.pixel(col, row) == 0:
-                    fb.fill_rect(x + ci*8*scale + col*scale,
-                                 y + row*scale, scale, scale, color)
-
-
 def triangle(fb, x0, y0, x1, y1, x2, y2, c):
     fb.line(x0, y0, x1, y1, c)
     fb.line(x1, y1, x2, y2, c)
     fb.line(x2, y2, x0, y0, c)
 
 
-# ── screen ────────────────────────────────────────────────────────────────────
+def draw_arch(fb, cx, cy, r, max_thick):
+    """Tapered arc — thickest at the crown, tapers to 1px at the tips."""
+    for x in range(max(0, cx - r + 1), min(WIDTH, cx + r)):
+        dx = x - cx
+        dy_sq = r * r - dx * dx
+        if dy_sq <= 0:
+            continue
+        dy = math.sqrt(dy_sq)
+        arc_y = int(cy - dy)
+        thick = max(1, int(max_thick * dy / r))
+        if 0 <= arc_y < HEIGHT:
+            fb.vline(x, arc_y, thick, 0)
 
-def draw(epd):
+
+# ── boot screen ───────────────────────────────────────────────────────────────
+
+def draw_boot(epd):
     fb = epd.fb
     fb.fill(1)
 
-    # header
+    # tapered arch — crown at y≈16, tips taper down to y≈78 at x≈20 and x≈156
+    draw_arch(fb, 88, 88, 72, 8)
+
+    # "ArkLight" 2x centred inside the arch
+    draw_big(fb, "ArkLight", 24, 65, 2, 0)
+
+    # triple separator
+    for dy in range(3):
+        fb.hline(0, 90 + dy, WIDTH, 0)
+
+    # 13 alternating warning stripes filling the rest of the screen
+    # each stripe 13px tall: 13 × 13 = 169px, y=93 to y=262
+    warnings = [
+        (True,  "!! PROTOTYPE BUILD !!"),   # 21 chars = 168px
+        (False, "NOT A FINAL PRODUCT"),      # 19 = 152px
+        (True,  "DO NOT DISTRIBUTE"),        # 17 = 136px
+        (False, "PREVIEW BUILD ONLY"),       # 18 = 144px
+        (True,  "!!! NOT FOR SALE !!!"),     # 20 = 160px
+        (False, "NOT A FINAL PRODUCT"),
+        (True,  "PROTOTYPE ONLY"),           # 14 = 112px
+        (False, "DO NOT SELL"),              # 11 = 88px
+        (True,  "!!! NOT FOR SALE !!!"),
+        (False, "PREVIEW BUILDS ONLY"),      # 19 = 152px
+        (True,  "NOT A FINAL PRODUCT"),
+        (False, "DO NOT DISTRIBUTE"),
+        (True,  "!! PROTOTYPE !!"),          # 15 = 120px
+    ]
+
+    y = 93
+    for inverted, text in warnings:
+        fb.fill_rect(0, y, WIDTH, 13, 0 if inverted else 1)
+        fb.text(text, (WIDTH - len(text) * 8) // 2, y + 3, 1 if inverted else 0)
+        y += 13
+
+    # seal the bottom with a solid black bar
+    fb.fill_rect(0, y, WIDTH, HEIGHT - y, 0)
+
+
+# ── graphics test screen ──────────────────────────────────────────────────────
+
+def draw_graphics_test(epd):
+    fb = epd.fb
+    fb.fill(1)
+
     fb.fill_rect(0, 0, WIDTH, 14, 0)
     hdr = "V2 GRAPHICS TEST"
     fb.text(hdr, (WIDTH - len(hdr) * 8) // 2, 3, 1)
 
-    # greyscale / dither bands
     band_labels = [("WHITE",   3, 0),
                    ("LT GREY", 2, 0),
                    ("DK GREY", 1, 1),
@@ -159,34 +208,20 @@ def draw(epd):
         fill_dither(fb, 0, y, WIDTH, 14, level)
         fb.text(lbl, (WIDTH - len(lbl) * 8) // 2, y + 3, tc)
 
-    # separator
     fb.hline(0, 70, WIDTH, 0)
 
-    # shapes (y=71 to y=125)
     sy = 71
-    fb.rect(4, sy + 4, 28, 20, 0)
-    fb.text("rect", 4, sy + 28, 0)
-
-    fb.fill_rect(40, sy + 4, 28, 20, 0)
-    fb.text("fill", 40, sy + 28, 0)
-
-    fb.line(76, sy + 4, 100, sy + 24, 0)
-    fb.line(76, sy + 24, 100, sy + 4, 0)
-    fb.text("line", 76, sy + 28, 0)
-
-    circle(fb, 124, sy + 14, 12, 0, fill=False)
-    fb.text("circ", 113, sy + 28, 0)
-
-    circle(fb, 160, sy + 14, 10, 0, fill=True)
-    fb.text("fill", 149, sy + 28, 0)
-
-    triangle(fb, 4, sy + 52, 28, sy + 52, 16, sy + 38, 0)
+    fb.rect(4, sy + 4, 28, 20, 0);      fb.text("rect", 4,   sy + 28, 0)
+    fb.fill_rect(40, sy + 4, 28, 20, 0); fb.text("fill", 40,  sy + 28, 0)
+    fb.line(76, sy+4, 100, sy+24, 0)
+    fb.line(76, sy+24, 100, sy+4, 0);   fb.text("line", 76,  sy + 28, 0)
+    circle(fb, 124, sy+14, 12, 0);      fb.text("circ", 113, sy + 28, 0)
+    circle(fb, 160, sy+14, 10, 0, fill=True); fb.text("fill", 149, sy + 28, 0)
+    triangle(fb, 4, sy+52, 28, sy+52, 16, sy+38, 0)
     fb.text("tri", 4, sy + 54, 0)
 
-    # separator
     fb.hline(0, 126, WIDTH, 0)
 
-    # text sizes (y=127+)
     fb.text("1x: AaBbCc 0123456", 2, 130, 0)
     fb.hline(0, 140, WIDTH, 0)
     draw_big(fb, "2x Hello!", 2, 143, 2, 0)
@@ -196,8 +231,15 @@ def draw(epd):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-print("V2 graphics test — init")
+print("ArkLight prototype boot")
 epd = EPD()
-draw(epd)
+
+draw_boot(epd)
 epd.show()
-print("done")
+print("boot screen shown, waiting 6s...")
+time.sleep(6)
+
+epd._init()
+draw_graphics_test(epd)
+epd.show()
+print("graphics test shown")
