@@ -2,7 +2,7 @@ import network, socket, ujson, ntptime, time, gc
 from machine import Pin, SoftSPI, reset
 import framebuf
 
-VERSION = "1.9"
+VERSION = "1.10"
 BETA    = True
 
 # ── staged OTA apply (runs before anything else) ──────────────────────────────
@@ -326,6 +326,13 @@ def https_body(host, path, cookie=None):
 
 # ── OTA update ────────────────────────────────────────────────────────────────
 
+def _ver_gt(a, b):
+    try:
+        return tuple(int(x) for x in a.split(".")) > tuple(int(x) for x in b.split("."))
+    except:
+        return False
+
+
 _OTA_HOST = "raw.githubusercontent.com"
 _OTA_BASE = "/Ilikehomeassistant/picodeck/main"
 
@@ -414,7 +421,7 @@ def ota_check(epd):
             print("OTA: could not fetch version")
             return
         remote = ver_body.strip().decode()
-        if remote == local_ver:
+        if not _ver_gt(remote, local_ver):
             print("OTA: up to date (%s)" % local_ver)
             return
 
