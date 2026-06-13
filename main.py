@@ -2,7 +2,7 @@ import network, socket, ujson, ntptime, time, gc
 from machine import Pin, SoftSPI, reset
 import framebuf
 
-VERSION = "1.10"
+VERSION = "1.11"
 BETA    = True
 
 # ── staged OTA apply (runs before anything else) ──────────────────────────────
@@ -257,7 +257,10 @@ def get_time():
         t = time.localtime(time.time() + TZ_OFFSET)
         if t[0] < 2024:
             return "--:--"
-        return "%02d:%02d" % (t[3], t[4])
+        h = t[3]
+        ampm = "AM" if h < 12 else "PM"
+        h = h % 12 or 12
+        return "%d:%02d %s" % (h, t[4], ampm)
     except:
         return "--:--"
 
