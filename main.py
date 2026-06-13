@@ -1,7 +1,6 @@
 """
 PicoDeck V2 — Graphics Test Screen
-One full refresh draws everything static; partial refresh loops the bottom
-animation zone. Branch: testing — never merged to main.
+Branch: testing — never merged to main.
 
 Layout (176 x 264):
   y=  0-13   Header bar
@@ -9,20 +8,13 @@ Layout (176 x 264):
   y= 70      Separator
   y= 71-125  Shapes                    (55 px)
   y=126      Separator
-  y=127-154  Text sizes                (28 px)
-  y=155      Separator
-  y=156-263  Animation zone            (108 px, partial refresh)
+  y=127-263  Text sizes                (137 px)
 """
 from machine import Pin, SoftSPI
-import framebuf, time, gc
+import framebuf, time
 
 WIDTH  = 176
 HEIGHT = 264
-
-ANIM_Y = 156
-ANIM_H = HEIGHT - ANIM_Y   # 108
-
-FULL_REFRESH_EVERY = 40    # re-init + full refresh to clear ghost after N frames
 
 
 # ── EPD driver ────────────────────────────────────────────────────────────────
@@ -83,10 +75,6 @@ class EPD:
         self._write(0x26, bytes([0xFF] * (WIDTH * HEIGHT // 8)))
         self._write(0x24, self.buf)
         self._turn_on(0xF7)
-
-    def show_partial(self):
-        self._write(0x24, self.buf)
-        self._turn_on(0xFF)
 
 
 # ── drawing primitives ────────────────────────────────────────────────────────
@@ -150,9 +138,9 @@ def triangle(fb, x0, y0, x1, y1, x2, y2, c):
     fb.line(x2, y2, x0, y0, c)
 
 
-# ── static screen (full refresh) ─────────────────────────────────────────────
+# ── screen ────────────────────────────────────────────────────────────────────
 
-def draw_static(epd):
+def draw(epd):
     fb = epd.fb
     fb.fill(1)
 
@@ -176,101 +164,40 @@ def draw_static(epd):
 
     # shapes (y=71 to y=125)
     sy = 71
-    # outline rect
     fb.rect(4, sy + 4, 28, 20, 0)
     fb.text("rect", 4, sy + 28, 0)
 
-    # filled rect
     fb.fill_rect(40, sy + 4, 28, 20, 0)
     fb.text("fill", 40, sy + 28, 0)
 
-    # X cross lines
     fb.line(76, sy + 4, 100, sy + 24, 0)
     fb.line(76, sy + 24, 100, sy + 4, 0)
     fb.text("line", 76, sy + 28, 0)
 
-    # circle
     circle(fb, 124, sy + 14, 12, 0, fill=False)
     fb.text("circ", 113, sy + 28, 0)
 
-    # filled circle
     circle(fb, 160, sy + 14, 10, 0, fill=True)
     fb.text("fill", 149, sy + 28, 0)
 
-    # triangle
-    triangle(fb, 4, sy + 44, 20, sy + 44, 12, sy + 36, 0)
-    fb.text("tri", 4, sy + 46, 0)
+    triangle(fb, 4, sy + 52, 28, sy + 52, 16, sy + 38, 0)
+    fb.text("tri", 4, sy + 54, 0)
 
     # separator
     fb.hline(0, 126, WIDTH, 0)
 
-    # text sizes (y=127 to y=154)
-    fb.text("1x: AaBbCc 0123456", 2, 129, 0)
-    draw_big(fb, "2x: Hello!", 2, 139, 2, 0)
-
-    # separator
-    fb.hline(0, 155, WIDTH, 0)
-
-    # animation zone border + label
-    fb.rect(0, ANIM_Y, WIDTH, ANIM_H, 0)
-    lbl = "PARTIAL REFRESH"
-    fb.text(lbl, (WIDTH - len(lbl) * 8) // 2, ANIM_Y + 3, 0)
-
-
-# ── animation zone (partial refresh) ─────────────────────────────────────────
-
-def draw_anim(epd, bx, by, vx, vy, frame):
-    fb = epd.fb
-    inner_y = ANIM_Y + 14
-    inner_h = ANIM_H - 15
-    fb.fill_rect(1, inner_y, WIDTH - 2, inner_h, 1)
-
-    # velocity arrows showing direction
-    ax = WIDTH // 2 + (vx * 10)
-    ay = ANIM_Y + ANIM_H - 22
-    fb.line(WIDTH // 2, ay, ax, ay, 0)
-    fb.line(WIDTH // 2, ay, WIDTH // 2, ay - (vy * 5), 0)
-
-    # bouncing ball
-    circle(fb, bx, by, 9, 0, fill=True)
-
-    # frame counter bottom-right
-    s = "f:%d" % frame
-    fb.text(s, WIDTH - len(s) * 8 - 3, ANIM_Y + ANIM_H - 11, 0)
-
-    epd.show_partial()
+    # text sizes (y=127+)
+    fb.text("1x: AaBbCc 0123456", 2, 130, 0)
+    fb.hline(0, 140, WIDTH, 0)
+    draw_big(fb, "2x Hello!", 2, 143, 2, 0)
+    fb.hline(0, 161, WIDTH, 0)
+    draw_big(fb, "3x Hi!", 2, 164, 3, 0)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 print("V2 graphics test — init")
 epd = EPD()
-draw_static(epd)
+draw(epd)
 epd.show()
-print("static drawn, starting animation loop")
-
-bx, by = WIDTH // 2, ANIM_Y + ANIM_H // 2
-vx, vy = 4, 3
-frame  = 0
-
-while True:
-    gc.collect()
-
-    bx += vx; by += vy
-
-    if bx - 9 <= 1:             bx = 10;            vx = abs(vx)
-    if bx + 9 >= WIDTH - 2:     bx = WIDTH - 11;    vx = -abs(vx)
-    if by - 9 <= ANIM_Y + 14:   by = ANIM_Y + 23;   vy = abs(vy)
-    if by + 9 >= HEIGHT - 2:    by = HEIGHT - 11;    vy = -abs(vy)
-
-    frame += 1
-    draw_anim(epd, bx, by, vx, vy, frame)
-
-    if frame % FULL_REFRESH_EVERY == 0:
-        print("full refresh to clear ghost (frame %d)" % frame)
-        epd._init()
-        draw_static(epd)
-        draw_anim(epd, bx, by, vx, vy, frame)
-        epd.show()
-
-    time.sleep_ms(150)
+print("done")
